@@ -95,12 +95,16 @@ def test_normalize_category_maps_common_aliases():
     assert normalize_category("직접노무비") == "노무비"
     assert normalize_category("인건비") == "노무비"
     assert normalize_category("일반관리비") == "관리비"
-    assert normalize_category("경비") == "관리비"
+    assert normalize_category("간접비") == "관리비"
+    # 경비는 관리비와 별개의 비목이다
+    assert normalize_category("경비") == "경비"
+    assert normalize_category("제경비") == "경비"
+    assert normalize_category("간접경비") == "경비"
     assert normalize_category("포장 및 운반비") == "포장비"
     assert normalize_category("이윤") == "영업이익"
     assert normalize_category("Labor") == "노무비"
     assert normalize_category("operating_profit") == "영업이익"
-    assert normalize_category("운반비") == ""  # 5개 비목에 없는 값은 매핑하지 않는다
+    assert normalize_category("운반비") == ""  # 표준 비목에 없는 값은 매핑하지 않는다
     assert normalize_category("") == ""
 
 
@@ -112,15 +116,24 @@ def test_is_cost_total_label():
 
 def test_cost_summary_from_mapping_and_list():
     mapping = CostSummary.from_raw(
-        {"재료비": "1,000", "인건비": 400, "일반관리비": 70, "포장비": 30, "이윤": 150, "합계": "1,650"}
+        {
+            "재료비": "1,000",
+            "인건비": 400,
+            "제경비": 50,
+            "일반관리비": 70,
+            "포장비": 30,
+            "이윤": 150,
+            "합계": "1,700",
+        }
     )
     assert mapping.material == 1000
     assert mapping.labor == 400
-    assert mapping.overhead == 70
+    assert mapping.expense == 50      # 제경비 → 경비
+    assert mapping.overhead == 70     # 일반관리비 → 관리비
     assert mapping.packaging == 30
     assert mapping.profit == 150
-    assert mapping.total == 1650
-    assert mapping.parts_sum() == 1650
+    assert mapping.total == 1700
+    assert mapping.parts_sum() == 1700
     assert mapping.missing() == []
 
     listed = CostSummary.from_raw(
@@ -128,7 +141,7 @@ def test_cost_summary_from_mapping_and_list():
     )
     assert listed.material == 1000
     assert listed.profit == 150
-    assert listed.missing() == ["노무비", "관리비", "포장비"]
+    assert listed.missing() == ["노무비", "경비", "관리비", "포장비"]
 
 
 def test_cost_summary_keeps_unknown_categories_separately():
@@ -171,10 +184,21 @@ def test_category_totals_mismatch_is_flagged():
     assert "category_mismatch" in codes
 
 
-def test_missing_category_is_flagged_when_partially_present():
-    doc = Document.from_raw({"원가": {"재료비": 1000, "노무비": 500}})
-    issue = next(issue for issue in doc.validate() if issue.code == "missing_category")
+def test_missing_category_is_flagged_only_when_total_does_not_add_up():
+    """합계가 어긋날 때에만 못 읽은 비목을 알려준다."""
+    off = Document.from_raw({"원가": {"재료비": 1000, "노무비": 500, "합계": 2000}})
+    issue = next(issue for issue in off.validate() if issue.code == "missing_category")
     assert "포장비" in issue.message and "영업이익" in issue.message
+
+    # 경비/포장비가 아예 없는 문서는 흔하다. 합계가 맞으면 경고하지 않는다.
+    balanced = Document.from_raw(
+        {"원가": {"재료비": 1000, "노무비": 500, "관리비": 100, "영업이익": 150, "합계": 1750}}
+    )
+    assert balanced.validate() == []
+
+    # 합계를 못 읽었으면 검증할 근거가 없으므로 조용히 넘어간다
+    no_total = Document.from_raw({"원가": {"재료비": 1000, "노무비": 500}})
+    assert not any(issue.code == "missing_category" for issue in no_total.validate())
 
 
 def test_unknown_item_category_is_reported_once_per_document():
@@ -220,5 +244,12 @@ def test_subtotal_check_only_runs_without_cost_breakdown():
     assert any(issue.code == "subtotal_mismatch" for issue in without_costs.validate())
 
 
-def test_cost_categories_are_the_five_requested():
-    assert COST_CATEGORIES == ("재료비", "노무비", "관리비", "포장비", "영업이익")
+def test_cost_categories_and_their_order():
+    assert COST_CATEGORIES == ("재료비", "노무비", "경비", "관리비", "포장비", "영업이익")
+
+
+def test_expense_and_overhead_are_not_merged():
+    doc = Document.from_raw({"원가": {"경비": 100, "일반관리비": 70, "합계": 170}})
+    assert doc.costs.expense == 100
+    assert doc.costs.overhead == 70
+    assert doc.validate() == []

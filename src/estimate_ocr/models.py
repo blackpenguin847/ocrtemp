@@ -27,12 +27,12 @@ TOTAL_TOLERANCE_RATIO = 0.01
 # --------------------------------------------------------------------------
 # 비목(원가 항목)
 # --------------------------------------------------------------------------
-#: 이 도구가 다루는 원가 비목. 순서가 곧 출력 순서다.
-COST_CATEGORIES = ("재료비", "노무비", "관리비", "포장비", "영업이익")
+#: 이 도구가 다루는 원가 비목. 순서가 곧 출력 순서이며,
+#: 원가계산의 관행대로 재료비 → 노무비 → 경비(= 제조원가) → 관리비 → 포장비 → 영업이익 순이다.
+COST_CATEGORIES = ("재료비", "노무비", "경비", "관리비", "포장비", "영업이익")
 
 #: 비목별 별칭. 문서마다 쓰는 말이 달라 여기서 표준 비목으로 모은다.
-#: 참고: 경비/제경비는 원래 별도 비목이지만, 이 도구의 5개 비목 중에는
-#: 관리비가 가장 가까워 관리비로 모은다. 분리해서 봐야 하면 이 표를 수정할 것.
+#: 경비(제경비·직접경비)와 관리비(일반관리비)는 서로 다른 비목이므로 섞지 않는다.
 CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
     "재료비": (
         "재료비", "재료비계", "재료비합계", "직접재료비", "간접재료비", "자재비", "재료",
@@ -42,10 +42,14 @@ CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
         "노무비", "노무비계", "노무비합계", "직접노무비", "간접노무비", "인건비", "노임",
         "가공비", "labor", "labour", "labor_cost", "wage",
     ),
+    "경비": (
+        "경비", "제경비", "경비계", "경비합계", "일반경비", "직접경비", "간접경비",
+        "기계경비", "expense", "expenses", "direct_expense", "overhead_expense",
+    ),
     "관리비": (
-        "관리비", "일반관리비", "관리비계", "간접비", "경비", "제경비", "일반경비",
+        "관리비", "일반관리비", "관리비계", "관리비합계", "간접비",
         "overhead", "admin", "administration", "administrative", "general_admin",
-        "indirect", "expense", "expenses",
+        "indirect",
     ),
     "포장비": (
         "포장비", "포장료", "포장비계", "포장및운반비", "포장운반비",
@@ -331,6 +335,10 @@ class CostSummary:
         return self.values.get("노무비")
 
     @property
+    def expense(self) -> float | None:
+        return self.values.get("경비")
+
+    @property
     def overhead(self) -> float | None:
         return self.values.get("관리비")
 
@@ -559,20 +567,30 @@ class Document:
             return issues
 
         parts = self.costs.parts_sum()
-        if parts is not None and self.costs.total is not None:
-            if not _close_enough(parts, self.costs.total, TOTAL_TOLERANCE, TOTAL_TOLERANCE_RATIO):
+        total = self.costs.total
+        if (
+            parts is not None
+            and total is not None
+            and not _close_enough(parts, total, TOTAL_TOLERANCE, TOTAL_TOLERANCE_RATIO)
+        ):
+            issues.append(
+                Issue(
+                    "cost_total_mismatch",
+                    f"비목 합계={parts:,.0f} 이지만 문서상 합계={total:,.0f} 입니다",
+                )
+            )
+            # 합계가 어긋날 때에 한해 못 읽은 비목을 알려준다. 원인인 경우가 많다.
+            # 반대로 합계가 맞으면 그 문서에 없는 비목이므로 경고하지 않는다
+            # (경비나 포장비가 없는 문서는 흔하다).
+            missing = self.costs.missing()
+            if missing:
                 issues.append(
                     Issue(
-                        "cost_total_mismatch",
-                        f"비목 합계={parts:,.0f} 이지만 문서상 합계={self.costs.total:,.0f} 입니다",
+                        "missing_category",
+                        f"읽지 못한 비목이 있습니다: {', '.join(missing)} "
+                        f"(차액 {total - parts:,.0f})",
                     )
                 )
-
-        missing = self.costs.missing()
-        if missing and len(missing) < len(COST_CATEGORIES):
-            issues.append(
-                Issue("missing_category", f"원가 요약에서 읽지 못한 비목: {', '.join(missing)}")
-            )
 
         for category, total in self.category_totals().items():
             recorded = self.costs.get(category)
