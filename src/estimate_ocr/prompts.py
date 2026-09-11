@@ -122,3 +122,24 @@ def text_to_json_prompt(text: str) -> str:
     return TEXT_TO_JSON_PROMPT.format(
         schema=JSON_SCHEMA_HINT, categories=CATEGORY_LIST, text=text.strip()
     )
+
+
+# --------------------------------------------------------------------------
+# Tesseract 보조 (--ocr assist)
+# --------------------------------------------------------------------------
+OCR_ASSIST_BLOCK = """
+--- 참고: 같은 페이지를 OCR 엔진으로 읽은 원문 ---
+{ocr_text}
+--- 참고 원문 끝 ---
+
+이 원문은 표의 줄 구조와 숫자를 비교적 정확히 읽지만, 글자를 잘못 읽거나
+칸이 밀리는 경우가 있습니다. **판단 기준은 이미지입니다.**
+- 숫자의 자릿수가 헷갈릴 때는 위 원문을 참고하십시오.
+- 원문에 없는 내용을 지어내지 마십시오.
+- 이미지와 원문이 다르면 이미지를 따르십시오.
+"""
+
+
+def assist_prompt(ocr_text: str) -> str:
+    """이미지 + OCR 원문을 함께 주는 1차 프롬프트."""
+    return USER_PROMPT + OCR_ASSIST_BLOCK.format(ocr_text=ocr_text.strip())

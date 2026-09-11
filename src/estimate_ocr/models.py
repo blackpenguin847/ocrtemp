@@ -27,6 +27,11 @@ TOTAL_TOLERANCE_RATIO = 0.01
 # --------------------------------------------------------------------------
 # 비목(원가 항목)
 # --------------------------------------------------------------------------
+#: OCR 원문과 금액을 대조할 때 같은 값으로 볼 차이 (원 단위 반올림 흡수)
+OCR_MATCH_TOLERANCE = 0.51
+#: 일치율이 이보다 낮으면 행 단위로 따지지 않고 문서 단위 경고 한 건만 남긴다
+OCR_CROSSCHECK_MIN_RATE = 0.5
+
 #: 이 도구가 다루는 원가 비목. 순서가 곧 출력 순서이며,
 #: 원가계산의 관행대로 재료비 → 노무비 → 경비(= 제조원가) → 관리비 → 포장비 → 영업이익 순이다.
 COST_CATEGORIES = ("재료비", "노무비", "경비", "관리비", "포장비", "영업이익")
@@ -439,6 +444,10 @@ class Document:
     error: str = ""           # JSON 파싱 실패 등 치명적 오류 메시지
     model: str = ""
     attempts: int = 0
+    # Tesseract 교차검증용. 활성화됐을 때만 채워진다.
+    ocr_text: str = ""
+    ocr_confidence: float = 0.0
+    ocr_numbers: set[float] = field(default_factory=set)
 
     @classmethod
     def from_raw(cls, raw: Any, *, source: str = "", page: int = 0) -> "Document":
@@ -511,6 +520,7 @@ class Document:
 
         issues.extend(self._validate_items())
         issues.extend(self._validate_costs())
+        issues.extend(self._crosscheck_ocr())
         return issues
 
     def _validate_items(self) -> list[Issue]:
@@ -547,6 +557,60 @@ class Document:
                 )
             )
         return issues
+
+    def _crosscheck_ocr(self) -> list[Issue]:
+        """모델이 읽은 숫자를 OCR 원문과 대조한다.
+
+        vision 모델의 숫자 오인식을 잡아내는 장치다. 다만 OCR 쪽이 표를 통째로
+        놓쳤을 수도 있으므로, **먼저 전체 일치율을 본다.**
+
+        - 대부분 일치하는데 몇 개만 어긋남 → 그 행이 수상하다 (행 단위 경고)
+        - 거의 다 어긋남 → 둘을 비교할 수 없는 상태다. 행마다 경고를 다는 대신
+          문서 단위로 한 번만 알린다 (그러지 않으면 모든 행이 노란색이 된다)
+        """
+        if not self.ocr_numbers or not self.items:
+            return []
+
+        candidates: list[tuple[int, str, float]] = []
+        for index, item in enumerate(self.items, start=1):
+            for label, value in (("단가", item.unit_price), ("금액", item.amount)):
+                if value is not None:
+                    candidates.append((index, label, value))
+        if not candidates:
+            return []
+
+        misses = [
+            (index, label)
+            for index, label, value in candidates
+            if not self._ocr_has(value)
+        ]
+        matched = len(candidates) - len(misses)
+        rate = matched / len(candidates)
+
+        if rate < OCR_CROSSCHECK_MIN_RATE:
+            return [
+                Issue(
+                    "ocr_unverified",
+                    f"OCR 원문과 숫자가 거의 일치하지 않습니다 "
+                    f"({len(candidates)}개 중 {matched}개만 일치). "
+                    "OCR 이 표를 못 읽었거나 모델이 표를 잘못 읽었을 수 있습니다",
+                )
+            ]
+
+        by_row: dict[int, list[str]] = {}
+        for index, label in misses:
+            by_row.setdefault(index, []).append(label)
+        return [
+            Issue(
+                "ocr_mismatch",
+                f"{', '.join(labels)} 값을 OCR 원문에서 찾지 못했습니다. 원본과 대조하세요",
+                row=index,
+            )
+            for index, labels in sorted(by_row.items())
+        ]
+
+    def _ocr_has(self, value: float) -> bool:
+        return any(abs(value - candidate) <= OCR_MATCH_TOLERANCE for candidate in self.ocr_numbers)
 
     def _validate_costs(self) -> list[Issue]:
         issues: list[Issue] = []
@@ -656,6 +720,8 @@ class Document:
             "비목별품목합계": self.category_totals(),
             "모델": self.model,
             "오류": self.error,
+            "OCR신뢰도": round(self.ocr_confidence, 1) if self.ocr_confidence else None,
+            "OCR원문": self.ocr_text,
             "품목": [item.to_dict() for item in self.items],
             "검수": [
                 {"행": issue.row, "코드": issue.code, "메시지": issue.message}

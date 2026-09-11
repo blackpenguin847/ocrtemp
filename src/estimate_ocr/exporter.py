@@ -280,6 +280,15 @@ def write_raw_text(documents: Sequence[Document], directory: Path) -> list[Path]
         path = directory / f"{stem}_p{document.page:03d}.txt"
         path.write_text(document.raw_text or document.error, encoding="utf-8")
         written.append(path)
+
+        # OCR 을 함께 돌렸다면 비교할 수 있도록 따로 저장한다
+        if document.ocr_text and document.ocr_text != document.raw_text:
+            ocr_path = directory / f"{stem}_p{document.page:03d}_ocr.txt"
+            ocr_path.write_text(
+                f"# Tesseract (신뢰도 {document.ocr_confidence:.1f})\n\n{document.ocr_text}",
+                encoding="utf-8",
+            )
+            written.append(ocr_path)
     return written
 
 

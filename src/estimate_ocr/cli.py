@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__, prompts
 from .exporter import FORMATS, export, write_raw_text
-from .extractor import Extractor
+from .extractor import OCR_MODES, Extractor
 from .models import Document
 from .ollama_client import (
     DEFAULT_HOST,
@@ -20,6 +20,7 @@ from .ollama_client import (
     OllamaError,
 )
 from .pdf_render import DEFAULT_DPI, DEFAULT_MAX_EDGE, collect_pdfs, parse_pages
+from .tesseract_ocr import DEFAULT_LANG, DEFAULT_PSM, TesseractError, TesseractOCR
 
 log = logging.getLogger("estimate_ocr")
 
@@ -60,6 +61,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pages", default=None, help="처리할 페이지. 예: 1,3,5-7 (기본: 전체)")
     parser.add_argument(
         "--raw-text", action="store_true", help="구조화 없이 원문 텍스트만 추출"
+    )
+    parser.add_argument(
+        "--ocr",
+        default="auto",
+        choices=OCR_MODES,
+        help=(
+            "Tesseract 보조 사용법. "
+            "auto=설치돼 있으면 교차검증+실패 시 대체(기본), "
+            "assist=OCR 원문을 모델에 함께 제공, "
+            "only=vision 없이 OCR 원문만 사용, off=끄기"
+        ),
+    )
+    parser.add_argument(
+        "--ocr-lang", default=DEFAULT_LANG, help=f"Tesseract 언어 (기본: {DEFAULT_LANG})"
+    )
+    parser.add_argument(
+        "--ocr-psm",
+        type=int,
+        default=DEFAULT_PSM,
+        help=f"Tesseract 페이지 분할 모드 (기본: {DEFAULT_PSM}. 표 문서는 4가 잘 맞음)",
+    )
+    parser.add_argument(
+        "--no-enhance",
+        action="store_true",
+        help="대비 보정을 끄고 원본 그대로 사용 (스캔이 이미 깨끗할 때)",
     )
     parser.add_argument(
         "--debug-images", action="store_true", help="전처리된 이미지를 <output>/_debug/ 에 저장"
@@ -120,15 +146,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"오류: {exc}", file=sys.stderr)
         return 3
 
-    extractor = Extractor(
-        client,
-        dpi=args.dpi,
-        max_edge=args.max_edge,
-        debug_dir=output_dir / "_debug" if args.debug_images else None,
-        progress=lambda message: print(message, file=sys.stderr),
-    )
+    ocr = TesseractOCR(lang=args.ocr_lang, psm=args.ocr_psm)
+    try:
+        extractor = Extractor(
+            client,
+            dpi=args.dpi,
+            max_edge=args.max_edge,
+            debug_dir=output_dir / "_debug" if args.debug_images else None,
+            progress=lambda message: print(message, file=sys.stderr),
+            ocr=ocr,
+            ocr_mode=args.ocr,
+            enhance=not args.no_enhance,
+        )
+    except TesseractError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 4
 
-    print(f"PDF {len(pdfs)}개 · 모델 {args.model} · {args.host}", file=sys.stderr)
+    ocr_state = f"OCR {args.ocr}" if extractor.ocr_enabled else "OCR 미사용"
+    print(
+        f"PDF {len(pdfs)}개 · 모델 {args.model} · {args.host} · {ocr_state}",
+        file=sys.stderr,
+    )
 
     try:
         documents = extractor.extract_paths(pdfs, pages=pages, raw_text=args.raw_text)

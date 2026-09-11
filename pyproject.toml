@@ -17,7 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+# Tesseract 보조 경로. 시스템 패키지도 필요하다:
+#   apt install tesseract-ocr tesseract-ocr-kor   /   brew install tesseract tesseract-lang
+tesseract = ["pytesseract>=0.3.10"]
+dev = ["pytest>=7.0", "pytesseract>=0.3.10"]
 
 [project.scripts]
 estimate-ocr = "estimate_ocr.cli:main"

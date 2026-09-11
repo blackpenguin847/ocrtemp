@@ -86,7 +86,7 @@ def test_render_pdf_respects_pages_and_max_edge(sample_pdf):
 
 def test_extract_pdf_happy_path(sample_pdf):
     client = FakeClient([GOOD_JSON, GOOD_JSON])
-    docs = Extractor(client).extract_pdf(sample_pdf)
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf)
 
     assert len(docs) == 2
     assert [doc.page for doc in docs] == [1, 2]
@@ -103,7 +103,7 @@ def test_extract_pdf_happy_path(sample_pdf):
 
 def test_extract_falls_back_to_simple_prompt(sample_pdf):
     client = FakeClient(["설명만 하고 JSON이 없습니다", GOOD_JSON], model="fake-vl")
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
 
     assert docs[0].attempts == 2
     assert len(docs[0].items) == 2
@@ -118,7 +118,7 @@ def test_extract_falls_back_to_text_then_json(sample_pdf):
             GOOD_JSON,                         # 3차 구조화
         ]
     )
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
 
     assert docs[0].attempts == 3
     assert len(docs[0].items) == 2
@@ -127,7 +127,7 @@ def test_extract_falls_back_to_text_then_json(sample_pdf):
 
 def test_extract_records_error_when_all_attempts_fail(sample_pdf):
     client = FakeClient(["없음", "없음", "", ])
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
 
     assert docs[0].error
     assert docs[0].items == []
@@ -136,7 +136,7 @@ def test_extract_records_error_when_all_attempts_fail(sample_pdf):
 
 def test_ollama_error_is_recorded_not_raised(sample_pdf):
     client = FakeClient([OllamaError("연결 실패")] * 3)
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
     assert "연결 실패" in docs[0].error
 
 
@@ -144,7 +144,7 @@ def test_raw_text_mode(sample_pdf, tmp_path):
     from estimate_ocr.exporter import write_raw_text
 
     client = FakeClient(["레미콘 | 2 | 1,500 | 3,000"])
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1], raw_text=True)
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1], raw_text=True)
     assert docs[0].raw_text.startswith("레미콘")
     assert docs[0].items == []
 
@@ -155,7 +155,7 @@ def test_raw_text_mode(sample_pdf, tmp_path):
 def test_debug_images_are_saved(sample_pdf, tmp_path):
     debug_dir = tmp_path / "out" / "_debug"
     client = FakeClient([GOOD_JSON])
-    Extractor(client, debug_dir=debug_dir).extract_pdf(sample_pdf, pages=[1])
+    Extractor(client, debug_dir=debug_dir, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
     assert (debug_dir / "견적서_p001.png").exists()
 
 
@@ -164,7 +164,7 @@ def test_export_all_formats(sample_pdf, tmp_path):
         {"품목": [{"품명": "", "수량": 2, "단가": 1000, "금액": 5}]}, ensure_ascii=False
     )
     client = FakeClient([GOOD_JSON, bad_json])
-    docs = Extractor(client).extract_pdf(sample_pdf)
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf)
 
     written = export(docs, tmp_path / "out", "all")
     names = {path.name for path in written}
@@ -195,7 +195,7 @@ def test_export_all_formats(sample_pdf, tmp_path):
 
 def test_export_marks_failed_documents(sample_pdf, tmp_path):
     client = FakeClient(["없음", "없음", ""])
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
     export(docs, tmp_path / "out", "xlsx")
 
     sheet = load_workbook(tmp_path / "out" / "result.xlsx")[SHEET_RESULT]
@@ -224,7 +224,7 @@ COST_ONLY_JSON = json.dumps(
 
 def test_cost_summary_sheet_is_written(sample_pdf, tmp_path):
     client = FakeClient([GOOD_JSON])
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
     export(docs, tmp_path / "out", "all")
 
     workbook = load_workbook(tmp_path / "out" / "result.xlsx")
@@ -246,7 +246,7 @@ def test_cost_summary_sheet_is_written(sample_pdf, tmp_path):
 def test_category_summary_rows_move_out_of_item_table(sample_pdf, tmp_path):
     """'재료비 | 1,000,000' 같은 집계 행은 품목이 아니라 원가 요약으로 간다."""
     client = FakeClient([COST_ONLY_JSON])
-    docs = Extractor(client).extract_pdf(sample_pdf, pages=[1])
+    docs = Extractor(client, ocr_mode="off").extract_pdf(sample_pdf, pages=[1])
     doc = docs[0]
 
     assert doc.items == []  # 집계 행만 있는 문서
