@@ -165,7 +165,23 @@ class Extractor:
 
     @staticmethod
     def _good(attempt: _Attempt) -> bool:
-        return bool(attempt.document and attempt.document.items and not attempt.document.error)
+        """재시도가 필요 없는 결과인지.
+
+        비목 집계만 실린 페이지(재료비/노무비/… 합계표)는 세부 품목이 0건이어도
+        정상적인 추출이므로 재시도 대상이 아니다.
+        """
+        document = attempt.document
+        if document is None or document.error:
+            return False
+        return bool(document.items) or document.costs.has_categories()
+
+    @staticmethod
+    def _score(document: Document) -> tuple[int, int]:
+        """어떤 시도를 채택할지 비교하는 기준: 품목 수, 그다음 읽어낸 비목 수."""
+        filled = sum(1 for value in document.costs.values.values() if value is not None)
+        if document.costs.total is not None:
+            filled += 1
+        return len(document.items), filled
 
     def _best(self, attempts: list[_Attempt], rendered: RenderedPage) -> Document:
         """품목을 가장 많이 건진 시도를 채택한다."""
@@ -178,10 +194,10 @@ class Extractor:
                 error=reasons or "추출에 실패했습니다",
             )
 
-        best = max(candidates, key=lambda attempt: len(attempt.document.items))
+        best = max(candidates, key=lambda attempt: self._score(attempt.document))
         document = best.document
         assert document is not None
-        if not document.items and not document.error:
+        if not document.items and not document.costs.has_categories() and not document.error:
             document.error = "품목을 한 건도 추출하지 못했습니다"
         if document.error and best.label != attempts[0].label:
             log.debug("%s p%d: %s 결과 채택", rendered.source.name, rendered.page, best.label)

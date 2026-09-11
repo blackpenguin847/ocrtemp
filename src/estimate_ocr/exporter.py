@@ -3,6 +3,7 @@
 xlsx 는 두 개의 시트를 만든다.
 
 - **추출결과**: 한 행 = 명세서의 한 품목. 경고가 걸린 행은 노란색으로 표시한다.
+- **원가요약**: 한 행 = 문서 하나. 비목별(재료비/노무비/관리비/포장비/영업이익) 금액.
 - **검수**: 자동 검증에서 걸린 경고 목록.
 """
 
@@ -19,19 +20,25 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .models import Document
+from .models import COST_CATEGORIES, Document
 
 log = logging.getLogger(__name__)
 
 FORMATS = ("json", "csv", "xlsx", "all")
 
 RESULT_HEADERS = [
-    "원본PDF", "페이지", "문서번호", "품명", "규격", "단위",
+    "원본PDF", "페이지", "문서번호", "구분", "품명", "규격", "단위",
     "수량", "단가", "금액", "비고",
 ]
+COST_HEADERS = (
+    ["원본PDF", "페이지", "문서번호", "업체명"]
+    + list(COST_CATEGORIES)
+    + ["합계", "비목합계", "품목합계"]
+)
 REVIEW_HEADERS = ["원본PDF", "페이지", "행", "품명", "코드", "내용"]
 
 SHEET_RESULT = "추출결과"
+SHEET_COST = "원가요약"
 SHEET_REVIEW = "검수"
 
 WARN_FILL = PatternFill("solid", fgColor="FFF2CC")   # 경고 행 (노란색)
@@ -50,15 +57,18 @@ def result_rows(documents: Sequence[Document]) -> list[dict[str, Any]]:
                     "원본PDF": document.source,
                     "페이지": document.page,
                     "문서번호": document.doc_no,
+                    "구분": "",
                     "품명": "",
                     "규격": "",
                     "단위": "",
                     "수량": None,
                     "단가": None,
                     "금액": None,
-                    "비고": document.error or "품목 없음",
+                    "비고": document.error
+                    or ("세부 품목 없음 (원가요약 시트 참고)" if document.costs.has_categories() else "품목 없음"),
                     "_issues": [issue.message for issue in document.validate()],
-                    "_failed": True,
+                    # 원가 요약만 있는 문서는 추출 실패가 아니다
+                    "_failed": bool(document.error) or not document.costs.has_categories(),
                 }
             )
             continue
@@ -74,6 +84,7 @@ def result_rows(documents: Sequence[Document]) -> list[dict[str, Any]]:
                     "원본PDF": document.source,
                     "페이지": document.page,
                     "문서번호": document.doc_no,
+                    "구분": item.category or item.raw_category,
                     "품명": item.name,
                     "규격": item.spec,
                     "단위": item.unit,
@@ -85,6 +96,33 @@ def result_rows(documents: Sequence[Document]) -> list[dict[str, Any]]:
                     "_failed": False,
                 }
             )
+    return rows
+
+
+def cost_rows(documents: Sequence[Document]) -> list[dict[str, Any]]:
+    """한 행 = 문서 하나. 비목별 원가 요약."""
+    rows: list[dict[str, Any]] = []
+    for document in documents:
+        costs = document.costs
+        flagged = {
+            issue.code
+            for issue in document.validate()
+            if issue.code
+            in ("cost_total_mismatch", "category_mismatch", "missing_category", "extra_category")
+        }
+        row: dict[str, Any] = {
+            "원본PDF": document.source,
+            "페이지": document.page,
+            "문서번호": document.doc_no,
+            "업체명": document.vendor,
+            "합계": costs.total,
+            "비목합계": costs.parts_sum(),
+            "품목합계": document.items_total(),
+            "_flagged": bool(flagged),
+        }
+        for category in COST_CATEGORIES:
+            row[category] = costs.get(category)
+        rows.append(row)
     return rows
 
 
@@ -137,6 +175,16 @@ def write_csv(documents: Sequence[Document], path: Path) -> Path:
     return path
 
 
+def write_cost_csv(documents: Sequence[Document], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=COST_HEADERS)
+        writer.writeheader()
+        for row in cost_rows(documents):
+            writer.writerow({key: row.get(key) for key in COST_HEADERS})
+    return path
+
+
 def write_review_csv(documents: Sequence[Document], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -171,6 +219,21 @@ def write_xlsx(documents: Sequence[Document], path: Path) -> Path:
                 target = result_sheet.cell(row=index, column=RESULT_HEADERS.index("품명") + 1)
                 target.comment = Comment(" / ".join(row["_issues"]), "estimate-ocr")
 
+    cost_sheet = workbook.create_sheet(SHEET_COST)
+    _write_sheet(cost_sheet, COST_HEADERS)
+    cost_numeric = {
+        COST_HEADERS.index(name) + 1
+        for name in list(COST_CATEGORIES) + ["합계", "비목합계", "품목합계"]
+    }
+    for row in cost_rows(documents):
+        cost_sheet.append([row.get(header) for header in COST_HEADERS])
+        index = cost_sheet.max_row
+        for column in cost_numeric:
+            cost_sheet.cell(row=index, column=column).number_format = NUMBER_FORMAT
+        if row["_flagged"]:
+            for column in range(1, len(COST_HEADERS) + 1):
+                cost_sheet.cell(row=index, column=column).fill = WARN_FILL
+
     review_sheet = workbook.create_sheet(SHEET_REVIEW)
     _write_sheet(review_sheet, REVIEW_HEADERS)
     for row in review_rows(documents):
@@ -178,7 +241,7 @@ def write_xlsx(documents: Sequence[Document], path: Path) -> Path:
     if review_sheet.max_row == 1:
         review_sheet.append(["", "", "", "", "", "경고 없음"])
 
-    for sheet in (result_sheet, review_sheet):
+    for sheet in (result_sheet, cost_sheet, review_sheet):
         _autosize(sheet)
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
@@ -243,6 +306,7 @@ def export(
         written.append(write_json(documents, directory / f"{stem}.json"))
     if "csv" in wanted:
         written.append(write_csv(documents, directory / f"{stem}.csv"))
+        written.append(write_cost_csv(documents, directory / f"{stem}_원가요약.csv"))
         written.append(write_review_csv(documents, directory / f"{stem}_검수.csv"))
     if "xlsx" in wanted:
         written.append(write_xlsx(documents, directory / f"{stem}.xlsx"))
