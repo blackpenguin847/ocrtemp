@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ocrlab"
+version = "0.1.0"
+description = "하나의 PDF를 여러 추출 엔진으로 각각 돌려 결과(JSON)를 비교하는 로컬 실험 도구"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "PyMuPDF>=1.23",
+    "Pillow>=10.0",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# Tesseract 엔진용. 시스템 패키지도 필요하다:
+#   apt install tesseract-ocr tesseract-ocr-kor
+#   brew install tesseract tesseract-lang
+tesseract = ["pytesseract>=0.3.10"]
+dev = ["pytest>=7.0", "pytesseract>=0.3.10"]
+
+[project.scripts]
+ocrlab = "ocrlab.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
