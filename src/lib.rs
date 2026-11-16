@@ -8,7 +8,9 @@ use base64::Engine;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use sha2::{Digest, Sha256};
-use std::io::{IsTerminal, Read, Write};
+
+pub mod cli;
+pub mod clip;
 
 const VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
@@ -16,7 +18,7 @@ const RAW: u8 = 0;
 const DEFLATE: u8 = 1;
 const KEY_DOMAIN: &[u8] = b"txtcrypt-v1-key";
 /// -k 옵션이나 TXTCRYPT_KEY 가 없을 때 쓰는 내장 키.
-const DEFAULT_PASSPHRASE: &str = "txtcrypt-default-9f2c41d7a6e05b38";
+pub(crate) const DEFAULT_PASSPHRASE: &str = "txtcrypt-default-9f2c41d7a6e05b38";
 pub const KEY_ENV: &str = "TXTCRYPT_KEY";
 
 fn derive_key(passphrase: &str) -> [u8; 32] {
@@ -76,80 +78,66 @@ pub fn decrypt(token: &str, passphrase: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// 두 실행 파일이 공유하는 명령행 옵션.
-pub struct Args {
-    pub passphrase: String,
-    pub input: Option<String>,
-    pub output: Option<String>,
-}
-
-pub fn parse_args(name: &str, what: &str) -> Args {
-    let mut key = None;
-    let mut input = None;
-    let mut output = None;
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-h" | "--help" | "/?" => {
-                println!(
-                    "사용법: {name} [-k 키] [-o 출력파일] [입력파일]\n\n\
-                     {what}\n\n\
-                     \x20 입력파일   생략하면 표준 입력에서 읽습니다 (파이프 또는 직접 붙여넣기)\n\
-                     \x20 -o 파일    결과를 파일로 저장 (생략하면 화면에 출력)\n\
-                     \x20 -k 키      암호 키. 생략하면 환경변수 {KEY_ENV}, 그것도 없으면 내장 키 사용"
-                );
-                std::process::exit(0);
-            }
-            "-k" | "--key" => key = Some(it.next().unwrap_or_else(|| die("-k 뒤에 키가 필요합니다"))),
-            "-o" | "--out" => {
-                output = Some(it.next().unwrap_or_else(|| die("-o 뒤에 파일명이 필요합니다")))
-            }
-            _ if input.is_none() => input = Some(a),
-            _ => die(&format!("알 수 없는 인자: {a} (-h 로 사용법 확인)")),
-        }
+/// 암호문을 한 조각이 `max` 글자를 넘지 않도록 `i/n:데이터` 형태로 나눈다.
+/// 한 조각에 다 들어가면 접두어 없이 그대로 돌려준다.
+pub fn split_token(token: &str, max: usize) -> Vec<String> {
+    if token.len() <= max {
+        return vec![token.to_string()];
     }
-    let passphrase = key
-        .or_else(|| std::env::var(KEY_ENV).ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| DEFAULT_PASSPHRASE.to_string());
-    Args { passphrase, input, output }
+    let mut digits = 1;
+    let (per, total) = loop {
+        let per = max.saturating_sub(2 * digits + 2).max(1);
+        let total = token.len().div_ceil(per);
+        if total.to_string().len() <= digits {
+            break (per, total);
+        }
+        digits += 1;
+    };
+    // 암호문은 ASCII 이므로 바이트 단위로 잘라도 안전하다.
+    token
+        .as_bytes()
+        .chunks(per)
+        .enumerate()
+        .map(|(i, c)| format!("{}/{}:{}", i + 1, total, std::str::from_utf8(c).unwrap()))
+        .collect()
 }
 
-pub fn read_input(path: Option<&str>) -> Vec<u8> {
-    match path {
-        Some(p) => std::fs::read(p).unwrap_or_else(|e| die(&format!("{p} 읽기 실패: {e}"))),
-        None => {
-            let stdin = std::io::stdin();
-            if stdin.is_terminal() {
-                let eof = if cfg!(windows) { "Ctrl+Z 후 Enter" } else { "Ctrl+D" };
-                eprintln!("내용을 붙여넣고 새 줄에서 {eof} 를 누르세요:");
-            }
-            let mut buf = Vec::new();
-            stdin
-                .lock()
-                .read_to_end(&mut buf)
-                .unwrap_or_else(|e| die(&format!("입력 읽기 실패: {e}")));
-            buf
-        }
+pub enum AssembleError {
+    /// 아직 없는 조각 번호들과 전체 조각 수.
+    Missing(Vec<usize>, usize),
+    Invalid(String),
+}
+
+fn parse_piece(word: &str) -> Option<(usize, usize, &str)> {
+    let (head, data) = word.split_once(':')?;
+    let (i, n) = head.split_once('/')?;
+    let (i, n) = (i.parse::<usize>().ok()?, n.parse::<usize>().ok()?);
+    let ok = !data.is_empty()
+        && data.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    (ok && i >= 1 && i <= n).then_some((i, n, data))
+}
+
+/// 입력 텍스트에서 암호문을 꺼낸다. `i/n:` 조각이 있으면 순서대로 이어 붙이고
+/// (조각이 아닌 단어는 무시), 없으면 공백만 제거한 전체를 암호문으로 본다.
+pub fn assemble(text: &str) -> Result<String, AssembleError> {
+    let pieces: Vec<_> = text.split_whitespace().filter_map(parse_piece).collect();
+    let Some(&(_, total, _)) = pieces.first() else {
+        return Ok(text.split_whitespace().collect());
+    };
+    if pieces.iter().any(|p| p.1 != total) {
+        return Err(AssembleError::Invalid("서로 다른 암호문의 조각이 섞여 있습니다".into()));
     }
-}
-
-pub fn write_output(path: Option<&str>, data: &[u8]) {
-    match path {
-        Some(p) => {
-            std::fs::write(p, data).unwrap_or_else(|e| die(&format!("{p} 쓰기 실패: {e}")))
-        }
-        None => {
-            let mut out = std::io::stdout().lock();
-            if out.write_all(data).and_then(|_| out.flush()).is_err() {
-                die("화면 출력 실패 (UTF-8이 아닌 내용일 수 있음). -o 로 파일에 저장하세요");
-            }
-        }
+    let mut slots = vec![None; total];
+    for (i, _, data) in pieces {
+        slots[i - 1].get_or_insert(data);
     }
-}
-
-pub fn die(msg: &str) -> ! {
-    eprintln!("오류: {msg}");
-    std::process::exit(1);
+    let missing: Vec<usize> =
+        slots.iter().enumerate().filter(|(_, s)| s.is_none()).map(|(i, _)| i + 1).collect();
+    if missing.is_empty() {
+        Ok(slots.into_iter().flatten().collect())
+    } else {
+        Err(AssembleError::Missing(missing, total))
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +160,28 @@ mod tests {
         assert_eq!(decrypt(&broken, "k").unwrap(), b"hello world");
         assert!(decrypt(&t, "other").is_err());
         assert!(decrypt(&t[..t.len() - 4], "k").is_err());
+    }
+
+    #[test]
+    fn split_and_assemble() {
+        let t = encrypt("SELECT 1;\n".repeat(3).as_bytes(), "k").unwrap();
+        for max in [16, 20, 50] {
+            let parts = split_token(&t, max);
+            assert!(parts.len() > 1);
+            assert!(parts.iter().all(|p| p.len() <= max));
+            // 순서가 섞이고 메신저 잡음(이름, 시각)이 끼어도 복원된다.
+            let mut noisy: Vec<String> =
+                parts.iter().map(|p| format!("[홍길동] [오후 3:02] {p}")).collect();
+            noisy.reverse();
+            assert!(assemble(&noisy.join("\n")).ok().as_deref() == Some(t.as_str()));
+        }
+        assert_eq!(split_token(&t, 1000), vec![t.clone()]);
+        let parts = split_token(&t, 20);
+        assert!(parts.len() >= 3 && parts[0].starts_with("1/"));
+        match assemble(&parts[1..].join(" ")) {
+            Err(AssembleError::Missing(m, n)) => assert_eq!((m, n), (vec![1], parts.len())),
+            _ => panic!("빠진 조각을 알려줘야 한다"),
+        }
     }
 
     #[test]

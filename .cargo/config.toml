@@ -1,0 +1,10 @@
+# Windows(MSVC) 빌드에서 C 런타임을 정적으로 링크해
+# VCRUNTIME140.dll 이 없는 PC에서도 exe 만으로 실행되게 한다.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
