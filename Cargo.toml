@@ -1,0 +1,27 @@
+[package]
+name = "txtcrypt"
+version = "0.1.0"
+edition = "2021"
+description = "문자열(쿼리, 프로시저 등)을 텍스트 형태로 암호화/복호화하는 도구"
+
+[[bin]]
+name = "encrypt"
+path = "src/bin/encrypt.rs"
+
+[[bin]]
+name = "decrypt"
+path = "src/bin/decrypt.rs"
+
+[dependencies]
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+miniz_oxide = "0.8"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
